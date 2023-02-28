@@ -28,7 +28,6 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.TextViewCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.dienvu.recyclerviewfastscroller.R
 import kotlinx.coroutines.*
 import kotlin.math.max
 import kotlin.math.min

@@ -4,6 +4,9 @@
     <!--fastScroller-->
     <dimen name="default_handle_size">18dp</dimen>
     <dimen name="default_popup_padding">16dp</dimen>
-
     <dimen name="default_handle_padding">4dp</dimen>
+    <dimen name="default_handle_width">26dp</dimen>
+    <dimen name="default_handle_height">40dp</dimen>
+    <dimen name="default_handle_right_padding">4dp</dimen>
+    <dimen name="default_handle_left_padding">12dp</dimen>
 </resources>

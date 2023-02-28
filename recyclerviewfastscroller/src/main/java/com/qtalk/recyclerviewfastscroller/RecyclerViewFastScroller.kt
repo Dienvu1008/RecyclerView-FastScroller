@@ -1,18 +1,4 @@
-/*
- * Copyright 2018 Quiph Media Pvt Ltd
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+
 @file:Suppress("unused", "MemberVisibilityCanBePrivate")
 
 package com.qtalk.recyclerviewfastscroller
@@ -21,9 +7,9 @@ import android.animation.Animator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.TypedArray
-import android.graphics.Rect
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.graphics.drawable.Drawable
-import android.os.Build
 import android.util.AttributeSet
 import android.util.Log
 import android.view.MotionEvent
@@ -42,12 +28,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.TextViewCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.Runnable
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import com.dienvu.recyclerviewfastscroller.R
+import kotlinx.coroutines.*
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -81,14 +63,13 @@ import kotlin.math.roundToInt
  * @version 1.0
  * */
 
-class RecyclerViewFastScroller @JvmOverloads constructor(
-    context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
-) : RelativeLayout(context, attrs, defStyleAttr) {
+class RecyclerViewFastScroller @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0) :
+    RelativeLayout(context, attrs, defStyleAttr) {
 
     companion object {
         private const val TAG: String = "RVFastScroller"
-        private const val ERROR_MESSAGE_NO_RECYCLER_VIEW =
-            "The RecyclerView required for initialization with FastScroller cannot be null"
+        private const val ERROR_MESSAGE_NO_RECYCLER_VIEW = "The RecyclerView required for initialization with FastScroller cannot be null"
+        private const val DARK_GREY = 0xFF333333.toInt()
     }
 
     enum class FastScrollDirection(val value: Int) {
@@ -122,7 +103,8 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
     private object Defaults {
         val popupDrawableInt: Int = R.drawable.custom_bg_primary
         val handleDrawableInt: Int = R.drawable.custom_bg_primary
-        val handleSize: Int = R.dimen.default_handle_size
+        val handleHeight: Int = R.dimen.default_handle_height
+        val handleWidth: Int = R.dimen.default_handle_width
         val textStyle: Int = R.style.FastScrollerTextAppearance
         val popupPosition: PopupPosition = PopupPosition.BEFORE_TRACK
         val fastScrollDirection: FastScrollDirection = FastScrollDirection.VERTICAL
@@ -130,8 +112,7 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
         const val isFastScrollEnabled: Boolean = true
         const val animationDuration: Long = 100
         const val popupVisibilityDuration = 200L
-        const val hasEmptyItemDecorator: Boolean = true
-        const val handleVisibilityDuration: Int = 0
+        const val handleVisibilityDuration: Int = 1000
         const val trackMargin: Int = 0
     }
 
@@ -185,6 +166,7 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      * The [TextView] which is used to display the popup text.
      **/
     lateinit var popupTextView: TextView
+    private var currentPopupItemPosition = -1
 
     var trackMarginStart: Int = 0
         set(value) {
@@ -209,6 +191,7 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
             field = value
             refreshHandleImageViewSize()
         }
+
     var handleHeight: Int = LayoutParams.WRAP_CONTENT
         set(value) {
             field = value
@@ -222,7 +205,6 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
 
     // --- internal properties
     private var popupPosition: PopupPosition = Defaults.popupPosition
-    private var hasEmptyItemDecorator: Boolean = Defaults.hasEmptyItemDecorator
     private lateinit var handleImageView: AppCompatImageView
     private lateinit var trackView: LinearLayout
     private lateinit var recyclerView: RecyclerView
@@ -233,31 +215,28 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
     private var hideHandleJob: Job? = null
 
     private val trackLength: Float
-        get() =
-            when (fastScrollDirection) {
-                FastScrollDirection.VERTICAL ->
-                    trackView.height
-                FastScrollDirection.HORIZONTAL ->
-                    trackView.width
-            }.toFloat()
+        get() = when (fastScrollDirection) {
+            FastScrollDirection.VERTICAL -> trackView.height
+            FastScrollDirection.HORIZONTAL -> trackView.width
+        }.toFloat()
 
     private val handleLength: Float
-        get() =
-            when (fastScrollDirection) {
-                FastScrollDirection.HORIZONTAL ->
-                    handleImageView.width
-                FastScrollDirection.VERTICAL ->
-                    handleImageView.height
-            }.toFloat()
+        get() = when (fastScrollDirection) {
+            FastScrollDirection.HORIZONTAL -> handleImageView.width
+            FastScrollDirection.VERTICAL -> handleImageView.height
+        }.toFloat()
 
     private val popupLength: Float
-        get() =
-            when (fastScrollDirection) {
-                FastScrollDirection.HORIZONTAL ->
-                    popupTextView.width
-                FastScrollDirection.VERTICAL ->
-                    popupTextView.height
-            }.toFloat()
+        get() = when (fastScrollDirection) {
+            FastScrollDirection.HORIZONTAL -> popupTextView.width
+            FastScrollDirection.VERTICAL -> popupTextView.height
+        }.toFloat()
+
+    // computeHorizontalScrollRange and computeHorizontalScrollOffset are unreliable with GridLayoutManager and spanCount > 1, so calculate height and offset
+    // manually if required. Can be used only in cases when every item has the same height
+    var calculateScrollPositionManually = false
+    var fullContentHeight = 0
+    private var scrollOffset = 0
 
     // property check
     /**
@@ -307,13 +286,7 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                 Defaults.isFastScrollEnabled
             )
 
-            hasEmptyItemDecorator = attribs.getBoolean(
-                R.styleable.RecyclerViewFastScroller_addLastItemPadding,
-                Defaults.hasEmptyItemDecorator
-            )
-
-            trackView.background =
-                attribs.getDrawable(R.styleable.RecyclerViewFastScroller_trackDrawable)
+            trackView.background = attribs.getDrawable(R.styleable.RecyclerViewFastScroller_trackDrawable)
 
             if (it.getBoolean(R.styleable.RecyclerViewFastScroller_supportSwipeToRefresh, false)) {
                 enableNestedScrolling()
@@ -324,45 +297,40 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
             alignPopupLayout()
 
             // if not defined, set default popupTextView background
-            popupTextView.background =
-                if (attribs.hasValue(R.styleable.RecyclerViewFastScroller_popupDrawable)) {
-                    loadDrawableFromAttributes(R.styleable.RecyclerViewFastScroller_popupDrawable)
-                } else {
-                    ContextCompat.getDrawable(context, Defaults.popupDrawableInt)
-                }
+            popupTextView.background = if (attribs.hasValue(R.styleable.RecyclerViewFastScroller_popupDrawable)) {
+                loadDrawableFromAttributes(R.styleable.RecyclerViewFastScroller_popupDrawable)
+            } else {
+                ContextCompat.getDrawable(context, Defaults.popupDrawableInt)
+            }
 
             // set default handleImageView drawable if not defined
-            handleDrawable =
-                (loadDrawableFromAttributes(R.styleable.RecyclerViewFastScroller_handleDrawable)
-                    ?: ContextCompat.getDrawable(context, Defaults.handleDrawableInt))
+            handleDrawable = (loadDrawableFromAttributes(R.styleable.RecyclerViewFastScroller_handleDrawable)
+                ?: ContextCompat.getDrawable(context, Defaults.handleDrawableInt))
 
-            handleVisibilityDuration =
-                attribs.getInt(
-                    R.styleable.RecyclerViewFastScroller_handleVisibilityDuration,
-                    Defaults.handleVisibilityDuration
-                )
+            handleVisibilityDuration = attribs.getInt(
+                R.styleable.RecyclerViewFastScroller_handleVisibilityDuration,
+                Defaults.handleVisibilityDuration
+            )
 
-            handleHeight =
-                attribs.getDimensionPixelSize(
-                    R.styleable.RecyclerViewFastScroller_handleHeight,
-                    loadDimenFromResource(Defaults.handleSize)
-                )
-            handleWidth =
-                attribs.getDimensionPixelSize(
-                    R.styleable.RecyclerViewFastScroller_handleWidth,
-                    loadDimenFromResource(Defaults.handleSize)
-                )
+            handleHeight = attribs.getDimensionPixelSize(
+                R.styleable.RecyclerViewFastScroller_handleHeight,
+                loadDimenFromResource(Defaults.handleHeight)
+            )
 
-            trackMarginStart =
-                attribs.getDimensionPixelSize(
-                    R.styleable.RecyclerViewFastScroller_trackMarginStart,
-                    Defaults.trackMargin
-                )
-            trackMarginEnd =
-                attribs.getDimensionPixelSize(
-                    R.styleable.RecyclerViewFastScroller_trackMarginEnd,
-                    Defaults.trackMargin
-                )
+            handleWidth = attribs.getDimensionPixelSize(
+                R.styleable.RecyclerViewFastScroller_handleWidth,
+                loadDimenFromResource(Defaults.handleWidth)
+            )
+
+            trackMarginStart = attribs.getDimensionPixelSize(
+                R.styleable.RecyclerViewFastScroller_trackMarginStart,
+                Defaults.trackMargin
+            )
+
+            trackMarginEnd = attribs.getDimensionPixelSize(
+                R.styleable.RecyclerViewFastScroller_trackMarginEnd,
+                Defaults.trackMargin
+            )
 
             TextViewCompat.setTextAppearance(
                 popupTextView,
@@ -437,10 +405,8 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                         val handleOffset = handleLength / 2
 
                         val currentRelativePos = when (fastScrollDirection) {
-                            FastScrollDirection.HORIZONTAL ->
-                                motionEvent.rawX - xAbsPosition - handleOffset
-                            FastScrollDirection.VERTICAL ->
-                                motionEvent.rawY - yAbsPosition - handleOffset
+                            FastScrollDirection.HORIZONTAL -> motionEvent.rawX - xAbsPosition - handleOffset
+                            FastScrollDirection.VERTICAL -> motionEvent.rawY - yAbsPosition - handleOffset
                         }
 
                         // move the handle only if fastScrolled, else leave the translation of the handle to the onScrolled method on the listener
@@ -448,8 +414,7 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                         if (isFastScrollEnabled) {
                             moveHandle(currentRelativePos)
 
-                            val position =
-                                recyclerView.computePositionForOffsetAndScroll(currentRelativePos)
+                            val position = recyclerView.computePositionForOffsetAndScroll(currentRelativePos)
                             if (motionEvent.action == MotionEvent.ACTION_MOVE) {
                                 handleStateListener?.onDragged(
                                     when (fastScrollDirection) {
@@ -459,17 +424,12 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                                 )
                             }
                             updateTextInPopup(
-                                min(
-                                    (recyclerView.adapter?.itemCount ?: 0) - 1,
-                                    position
-                                )
+                                min((recyclerView.adapter?.itemCount ?: 0) - 1, position)
                             )
                         } else {
                             when ((recyclerView.layoutManager as LinearLayoutManager).orientation) {
-                                RecyclerView.HORIZONTAL ->
-                                    recyclerView.scrollBy(currentRelativePos.toInt(), 0)
-                                RecyclerView.VERTICAL ->
-                                    recyclerView.scrollBy(0, currentRelativePos.toInt())
+                                RecyclerView.HORIZONTAL -> recyclerView.scrollBy(currentRelativePos.toInt(), 0)
+                                RecyclerView.VERTICAL -> recyclerView.scrollBy(0, currentRelativePos.toInt())
                             }
                         }
 
@@ -487,56 +447,55 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                         }
                         super.onTouchEvent(motionEvent)
                     }
-                    else -> {
-                        false
-                    }
+                    else -> false
                 }
             }
 
             // set the same touch listeners to both handle and track as they have the same functionality
-            handleImageView.setOnTouchListener(touchListener)
-            trackView.setOnTouchListener(touchListener)
+            if (isFastScrollEnabled) {
+                handleImageView.setOnTouchListener(touchListener)
+            }
         }
     }
 
     private fun alignPopupLayout() {
-        val lpPopupLayout =
-            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).also {
-                when (popupPosition) {
-                    PopupPosition.BEFORE_TRACK -> {
-                        when (fastScrollDirection) {
-                            FastScrollDirection.HORIZONTAL ->
-                                it.addRule(ABOVE, trackView.id)
-                            FastScrollDirection.VERTICAL -> {
-                                if (Build.VERSION.SDK_INT > 16)
-                                    it.addRule(START_OF, trackView.id)
-                                else
-                                    it.addRule(LEFT_OF, trackView.id)
-                            }
-                        }
+        val lpPopupLayout = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).also {
+            when (popupPosition) {
+                PopupPosition.BEFORE_TRACK -> {
+                    when (fastScrollDirection) {
+                        FastScrollDirection.HORIZONTAL -> it.addRule(ABOVE, trackView.id)
+                        FastScrollDirection.VERTICAL -> it.addRule(START_OF, trackView.id)
                     }
-                    PopupPosition.AFTER_TRACK -> {
-                        when (fastScrollDirection) {
-                            FastScrollDirection.HORIZONTAL ->
-                                it.addRule(BELOW, trackView.id)
-                            FastScrollDirection.VERTICAL -> {
-                                if (Build.VERSION.SDK_INT > 16)
-                                    it.addRule(END_OF, trackView.id)
-                                else
-                                    it.addRule(RIGHT_OF, trackView.id)
-                            }
-                        }
+                }
+                PopupPosition.AFTER_TRACK -> {
+                    when (fastScrollDirection) {
+                        FastScrollDirection.HORIZONTAL -> it.addRule(BELOW, trackView.id)
+                        FastScrollDirection.VERTICAL -> it.addRule(END_OF, trackView.id)
                     }
                 }
             }
+        }
         popupTextView.layoutParams = lpPopupLayout
     }
 
     private fun alignTrackAndHandle() {
-        val padding = resources.getDimensionPixelOffset(R.dimen.default_handle_padding)
+        val startPaddingId = if (isRTLLayout()) {
+            R.dimen.default_handle_right_padding
+        } else {
+            R.dimen.default_handle_left_padding
+        }
+
+        val endPaddingId = if (isRTLLayout()) {
+            R.dimen.default_handle_left_padding
+        } else {
+            R.dimen.default_handle_right_padding
+        }
+
+        val leftPadding = resources.getDimensionPixelOffset(startPaddingId)
+        val rightPadding = resources.getDimensionPixelOffset(endPaddingId)
         when (fastScrollDirection) {
             FastScrollDirection.HORIZONTAL -> {
-                handleImageView.setPadding(0, padding, 0, padding)
+                handleImageView.setPadding(0, leftPadding, 0, rightPadding)
                 popupTextView.layoutParams = LayoutParams(
                     LayoutParams.WRAP_CONTENT,
                     LayoutParams.WRAP_CONTENT
@@ -547,24 +506,18 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                 ).also { it.addRule(ALIGN_PARENT_BOTTOM) }
             }
             FastScrollDirection.VERTICAL -> {
-                handleImageView.setPadding(padding, 0, padding, 0)
+                handleImageView.setPadding(leftPadding, 0, rightPadding, 0)
                 popupTextView.layoutParams = LayoutParams(
                     LayoutParams.WRAP_CONTENT,
                     LayoutParams.WRAP_CONTENT
                 ).also {
-                    if (Build.VERSION.SDK_INT > 16)
-                        it.addRule(ALIGN_END, R.id.trackView)
-                    else
-                        it.addRule(ALIGN_RIGHT, R.id.trackView)
+                    it.addRule(ALIGN_END, R.id.trackView)
                 }
                 trackView.layoutParams = LayoutParams(
                     LayoutParams.WRAP_CONTENT,
                     LayoutParams.MATCH_PARENT
                 ).also {
-                    if (Build.VERSION.SDK_INT > 16)
-                        it.addRule(ALIGN_PARENT_END)
-                    else
-                        it.addRule(ALIGN_PARENT_RIGHT)
+                    it.addRule(ALIGN_PARENT_END)
                 }
             }
         }
@@ -576,7 +529,11 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
                 }
                 FastScrollDirection.VERTICAL -> {
                     handleImageView.x = 0F
-                    popupTextView.x = trackView.x - popupTextView.width
+                    popupTextView.x = if (isRTLLayout()) {
+                        trackView.x + popupTextView.width
+                    } else {
+                        trackView.x - popupTextView.width
+                    }
                 }
             }
 
@@ -587,14 +544,11 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
     private fun setTrackMargin() {
         with(trackView.layoutParams as MarginLayoutParams) {
             when (fastScrollDirection) {
-                FastScrollDirection.HORIZONTAL ->
-                    if (Build.VERSION.SDK_INT > 16) {
-                        marginStart = trackMarginStart
-                        marginEnd = trackMarginEnd
-                    } else
-                        setMargins(trackMarginStart, 0, trackMarginEnd, 0)
-                FastScrollDirection.VERTICAL ->
-                    setMargins(0, trackMarginStart, 0, trackMarginEnd)
+                FastScrollDirection.HORIZONTAL -> {
+                    marginStart = trackMarginStart
+                    marginEnd = trackMarginEnd
+                }
+                FastScrollDirection.VERTICAL -> setMargins(0, trackMarginStart, 0, trackMarginEnd)
             }
         }
     }
@@ -616,17 +570,17 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
 
     private fun addPopupLayout() {
         View.inflate(context, R.layout.fastscroller_popup, this)
-        popupTextView = findViewById(R.id.fastScrollPopupTV)
+        popupTextView = findViewById(R.id.fastscrollPopupTV)
     }
+
+    private fun isRTLLayout() = resources.configuration.layoutDirection == View.LAYOUT_DIRECTION_RTL
 
     /**
      * Sets [isNestedScrollingEnabled] to true to enable support for fast scrolling when swipe
      * refresh layout is added as parent layout.
      */
     private fun enableNestedScrolling() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            isNestedScrollingEnabled = true
-        }
+        isNestedScrollingEnabled = true
     }
 
     private fun moveHandle(offset: Float) {
@@ -657,10 +611,8 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      * */
     private fun moveViewToRelativePositionWithBounds(view: View, finalOffset: Float) {
         when (fastScrollDirection) {
-            FastScrollDirection.HORIZONTAL ->
-                view.x = min(max(finalOffset, 0F), (trackLength - view.width.toFloat()))
-            FastScrollDirection.VERTICAL ->
-                view.y = min(max(finalOffset, 0F), (trackLength - view.height.toFloat()))
+            FastScrollDirection.HORIZONTAL -> view.x = min(max(finalOffset, 0F), (trackLength - view.width.toFloat()))
+            FastScrollDirection.VERTICAL -> view.y = min(max(finalOffset, 0F), (trackLength - view.height.toFloat()))
         }
     }
 
@@ -669,16 +621,13 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      * */
     private inline fun ViewPropertyAnimator.onAnimationCancelled(crossinline body: () -> Unit) {
         this.setListener(object : Animator.AnimatorListener {
-            override fun onAnimationRepeat(p0: Animator?) {
-            }
+            override fun onAnimationRepeat(animation: Animator) {}
 
-            override fun onAnimationEnd(p0: Animator?) {
-            }
+            override fun onAnimationEnd(animation: Animator) {}
 
-            override fun onAnimationStart(p0: Animator?) {
-            }
+            override fun onAnimationStart(animation: Animator) {}
 
-            override fun onAnimationCancel(p0: Animator?) {
+            override fun onAnimationCancel(animation: Animator) {
                 body()
             }
         })
@@ -690,24 +639,25 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      * @param makeVisible
      * */
     private fun View.animateVisibility(makeVisible: Boolean = true) {
-
-        val scaleFactor: Float = if (makeVisible) 1f else 0f
-        this.animate().scaleX(scaleFactor).setDuration(Defaults.animationDuration)
-            .onAnimationCancelled {
-                this.animate().scaleX(scaleFactor).duration = Defaults.animationDuration
-            }
-        this.animate().scaleY(scaleFactor).setDuration(Defaults.animationDuration)
-            .onAnimationCancelled {
-                this.animate().scaleY(scaleFactor).duration = Defaults.animationDuration
-            }
+        if (makeVisible) {
+            scaleX = 1f
+            scaleY = 1f
+        } else {
+            animate().scaleX(0f).setDuration(Defaults.animationDuration)
+                .onAnimationCancelled {
+                    animate().scaleX(0f).duration = Defaults.animationDuration
+                }
+            animate().scaleY(0f).setDuration(Defaults.animationDuration)
+                .onAnimationCancelled {
+                    animate().scaleY(0f).duration = Defaults.animationDuration
+                }
+        }
     }
 
     // set of load methods for handy loading from attribs
-    private fun loadDimenFromResource(@DimenRes dimenSize: Int): Int =
-        context.resources.getDimensionPixelSize(dimenSize)
+    private fun loadDimenFromResource(@DimenRes dimenSize: Int): Int = context.resources.getDimensionPixelSize(dimenSize)
 
-    private fun loadDrawableFromAttributes(@StyleableRes styleId: Int) =
-        attribs?.getDrawable(styleId)
+    private fun loadDrawableFromAttributes(@StyleableRes styleId: Int) = attribs?.getDrawable(styleId)
 
     // extension functions to get the total visible count of items.
     private fun LinearLayoutManager.getTotalCompletelyVisibleItemCount(): Int {
@@ -716,13 +666,11 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
         // thus let's compute with the visible elements' position
         // instead of completely visible positions
 
-        val firstVisibleItemPosition =
-            this.findFirstCompletelyVisibleItemPosition().takeIf { it != RecyclerView.NO_POSITION }
-                ?: this.findFirstVisibleItemPosition()
+        val firstVisibleItemPosition = this.findFirstCompletelyVisibleItemPosition().takeIf { it != RecyclerView.NO_POSITION }
+            ?: this.findFirstVisibleItemPosition()
 
-        val lastVisibleItemPosition =
-            this.findLastCompletelyVisibleItemPosition().takeIf { it != RecyclerView.NO_POSITION }
-                ?: this.findLastVisibleItemPosition()
+        val lastVisibleItemPosition = this.findLastCompletelyVisibleItemPosition().takeIf { it != RecyclerView.NO_POSITION }
+            ?: this.findLastVisibleItemPosition()
 
         return if (firstVisibleItemPosition == RecyclerView.NO_POSITION || lastVisibleItemPosition == RecyclerView.NO_POSITION) {
             RecyclerView.NO_POSITION
@@ -763,31 +711,27 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
             is LinearLayoutManager -> {
                 val totalVisibleItems = layoutManager.getTotalCompletelyVisibleItemCount()
 
-                if (totalVisibleItems == RecyclerView.NO_POSITION) return RecyclerView.NO_POSITION
+                if (totalVisibleItems == RecyclerView.NO_POSITION) {
+                    return RecyclerView.NO_POSITION
+                }
 
                 // the last item would have one less visible item, this is to offset it.
                 previousTotalVisibleItem = max(previousTotalVisibleItem, totalVisibleItems)
                 // check bounds and then set position
                 val position =
-                    if (layoutManager.reverseLayout)
+                    if (layoutManager.reverseLayout) {
                         min(
                             recyclerViewItemCount,
-                            max(
-                                0,
-                                recyclerViewItemCount - (newOffset * (recyclerViewItemCount - totalVisibleItems)).roundToInt()
-                            )
+                            max(0, recyclerViewItemCount - (newOffset * (recyclerViewItemCount - totalVisibleItems)).roundToInt())
                         )
-                    else
+                    } else {
                         min(
                             recyclerViewItemCount,
-                            max(
-                                0,
-                                (newOffset * (recyclerViewItemCount - totalVisibleItems)).roundToInt()
-                            )
+                            max(0, (newOffset * (recyclerViewItemCount - totalVisibleItems)).roundToInt())
                         )
+                    }
 
-                val toScrollPosition =
-                    min((this.adapter?.itemCount ?: 0) - (previousTotalVisibleItem + 1), position)
+                val toScrollPosition = min((this.adapter?.itemCount ?: 0) - (previousTotalVisibleItem + 1), position)
                 safeScrollToPosition(toScrollPosition)
                 position
             }
@@ -803,52 +747,17 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      * Update popup text or hide popup when the interface is not implemented
      * */
     private fun updateTextInPopup(position: Int) {
-        if (position !in 0 until (recyclerView.adapter?.itemCount ?: 1)) {
+        if (position == currentPopupItemPosition || position !in 0 until (recyclerView.adapter?.itemCount ?: 1)) {
             return
         }
 
+        currentPopupItemPosition = position
         when (val adapter = recyclerView.adapter) {
-            null -> {
-                throw IllegalAccessException("No adapter found, if you have an adapter then try placing if before calling the attachFastScrollerToRecyclerView() method")
-            }
+            null -> throw IllegalAccessException("No adapter found, if you have an adapter then try placing if before calling the attachFastScrollerToRecyclerView() method")
             is OnPopupTextUpdate -> popupTextView.text = adapter.onChange(position).toString()
-            is OnPopupViewUpdate -> {
-                adapter.onUpdate(position, popupTextView)
-            }
-            else -> {
-                popupTextView.visibility = View.GONE
-            }
+            is OnPopupViewUpdate -> adapter.onUpdate(position, popupTextView)
+            else -> popupTextView.visibility = View.GONE
         }
-    }
-
-    private val emptySpaceItemDecoration by lazy {
-        object : RecyclerView.ItemDecoration() {
-
-            override fun getItemOffsets(
-                outRect: Rect,
-                view: View,
-                parent: RecyclerView,
-                state: RecyclerView.State
-            ) {
-                super.getItemOffsets(outRect, view, parent, state)
-                if (parent.getChildAdapterPosition(view) == parent.adapter?.itemCount ?: 0 - 1) {
-                    val currentVisiblePos: Int =
-                        (recyclerView.layoutManager as LinearLayoutManager).findFirstVisibleItemPosition()
-                    if (currentVisiblePos != RecyclerView.NO_POSITION) {
-                        outRect.bottom =
-                            (parent.findViewHolderForAdapterPosition(currentVisiblePos)?.itemView?.height
-                                ?: 0)
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * adds empty space to the last item of the [RecyclerView]
-     **/
-    private fun setEmptySpaceItemDecorator() {
-        recyclerView.addItemDecoration(emptySpaceItemDecoration)
     }
 
     private val adapterDataObserver = lazy {
@@ -856,11 +765,13 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
             override fun onChanged() {
                 super.onChanged()
                 previousTotalVisibleItem = 0
+                currentPopupItemPosition = -1
             }
 
             override fun onItemRangeRemoved(positionStart: Int, itemCount: Int) {
                 super.onItemRangeRemoved(positionStart, itemCount)
                 previousTotalVisibleItem = 0
+                currentPopupItemPosition = -1
             }
         }
     }
@@ -872,48 +783,63 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
     private val onScrollListener = object : RecyclerView.OnScrollListener() {
         override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
             super.onScrolled(recyclerView, dx, dy)
-            if (isEngaged && isFastScrollEnabled) return
+            if (isEngaged && isFastScrollEnabled) {
+                return
+            }
 
-            val (range, extent, offset) =
-                when ((recyclerView.layoutManager as LinearLayoutManager).orientation) {
-                    RecyclerView.HORIZONTAL ->
+            scrollOffset += dy
+            val orientation = (recyclerView.layoutManager as LinearLayoutManager).orientation
+            val (range, extent, offset) = when (orientation) {
+                RecyclerView.HORIZONTAL -> Triple(
+                    recyclerView.computeHorizontalScrollRange(),
+                    recyclerView.computeHorizontalScrollExtent(),
+                    recyclerView.computeHorizontalScrollOffset()
+                )
+                RecyclerView.VERTICAL -> {
+                    if (calculateScrollPositionManually) {
                         Triple(
-                            recyclerView.computeHorizontalScrollRange(),
-                            recyclerView.computeHorizontalScrollExtent(),
-                            recyclerView.computeHorizontalScrollOffset()
+                            fullContentHeight,
+                            recyclerView.computeVerticalScrollExtent(),
+                            scrollOffset
                         )
-                    RecyclerView.VERTICAL ->
+                    } else {
                         Triple(
                             recyclerView.computeVerticalScrollRange(),
                             recyclerView.computeVerticalScrollExtent(),
                             recyclerView.computeVerticalScrollOffset()
                         )
-                    else -> error("The orientation of the LinearLayoutManager should be horizontal or vertical")
+                    }
                 }
+                else -> error("The orientation of the LinearLayoutManager should be horizontal or vertical")
+            }
 
             // check if the layout is scrollable. i.e. range is large than extent, else disable fast scrolling and track touches.
             if (extent < range) {
-                handleImageView.animateVisibility()
-                handleImageView.isEnabled = true
-                trackView.isEnabled = true
+                if (dy != 0 && orientation == RecyclerView.VERTICAL) {
+                    handleImageView.animateVisibility()
+                    handleImageView.isEnabled = true
+                    trackView.isEnabled = true
+                }
             } else {
-                handleImageView.animateVisibility(false)
-                trackView.isEnabled = false
-                handleImageView.isEnabled = false
+                if (dx != 0 && orientation == RecyclerView.HORIZONTAL) {
+                    handleImageView.animateVisibility(false)
+                    trackView.isEnabled = false
+                    handleImageView.isEnabled = false
+                }
                 return
             }
 
-            val error = extent.toFloat() * offset / range
-            val finalOffset: Float = (trackLength - handleLength) * ((error + offset) / range)
+            val availableTrackLength = extent.toFloat() - handleLength
+            val scrollPositionPercent = (offset.toFloat() / (range - extent))
+            val finalOffset = availableTrackLength * scrollPositionPercent
 
-            moveHandle(finalOffset)
+            if ((dy != 0 && orientation == RecyclerView.VERTICAL) || (dx != 0 && orientation == RecyclerView.HORIZONTAL)) {
+                moveHandle(finalOffset)
+            }
         }
     }
 
     private fun initImpl() {
-        if (hasEmptyItemDecorator) {
-            setEmptySpaceItemDecorator()
-        }
         registerDataObserver()
         recyclerView.addOnScrollListener(onScrollListener)
     }
@@ -926,6 +852,32 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
      **/
     fun setHandleStateListener(handleStateListener: HandleStateListener) {
         this.handleStateListener = handleStateListener
+    }
+
+    fun updateColors(primaryColor: Int) {
+        handleImageView.setColorFilter(primaryColor, PorterDuff.Mode.SRC_IN)
+        popupTextView.setTextColor(getContrastColor(primaryColor))
+        popupTextView.background.mutate().setColorFilter(primaryColor, PorterDuff.Mode.SRC_IN)
+    }
+
+    fun setScrollVertically(scrollVertically: Boolean) {
+        if (scrollVertically && fastScrollDirection == FastScrollDirection.HORIZONTAL) {
+            fastScrollDirection = FastScrollDirection.VERTICAL
+            val tmp = handleWidth
+            handleWidth = handleHeight
+            handleHeight = tmp
+        } else if (!scrollVertically && fastScrollDirection == FastScrollDirection.VERTICAL) {
+            fastScrollDirection = FastScrollDirection.HORIZONTAL
+            val tmp = handleWidth
+            handleWidth = handleHeight
+            handleHeight = tmp
+        }
+    }
+
+    fun resetManualScrolling() {
+        calculateScrollPositionManually = false
+        fullContentHeight = 0
+        scrollOffset = 0
     }
 
     /**
@@ -961,14 +913,15 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
     fun detachFastScrollerFromRecyclerView() {
         // unregister the observer to prevent memory leaks only if initialized
         if (adapterDataObserver.isInitialized()) {
-            recyclerView.adapter?.unregisterAdapterDataObserver(adapterDataObserver.value)
+            try {
+                recyclerView.adapter?.unregisterAdapterDataObserver(adapterDataObserver.value)
+            } catch (ignored: Exception) {
+            }
         }
+
         handleImageView.setOnTouchListener(null)
         popupTextView.setOnTouchListener(null)
         recyclerView.removeOnScrollListener(onScrollListener)
-        if (hasEmptyItemDecorator) {
-            recyclerView.removeItemDecoration(emptySpaceItemDecoration)
-        }
     }
 
     @Keep
@@ -1037,5 +990,10 @@ class RecyclerViewFastScroller @JvmOverloads constructor(
         if (BuildConfig.DEBUG) {
             Log.d(TAG, message)
         }
+    }
+
+    fun getContrastColor(color: Int): Int {
+        val y = (299 * Color.red(color) + 587 * Color.green(color) + 114 * Color.blue(color)) / 1000
+        return if (y >= 149 && color != Color.BLACK) DARK_GREY else Color.WHITE
     }
 }
